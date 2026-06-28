@@ -58,10 +58,14 @@ jobs:
       # ------------------------------------------------------
       - name: Run MLflow Project (training)
         working-directory: MLProject
+        env:
+          # Set experiment name agar run tercatat di experiment "telco_churn_ci"
+          # bukan "Default" — supaya step "Display training summary" bisa menemukannya
+          MLFLOW_EXPERIMENT_NAME: telco_churn_ci
         run: |
           # --env-manager=local pakai env yang sudah di-install di step sebelumnya
           # supaya tidak perlu build conda env baru (menghemat waktu CI)
-          mlflow run . --env-manager=local
+          mlflow run . --env-manager=local --experiment-name telco_churn_ci
 
       - name: Get run_id of latest training
         id: get_run_id
@@ -80,16 +84,28 @@ jobs:
         working-directory: MLProject
         run: |
           python - << 'EOF'
+          import sys
           import mlflow
+
           mlflow.set_tracking_uri('file:./mlruns')
           experiment = mlflow.get_experiment_by_name('telco_churn_ci')
+
+          # Defensive check: jika experiment tidak ditemukan, tampilkan daftar
+          # experiment yang ADA agar gampang diagnose
+          if experiment is None:
+              client = mlflow.tracking.MlflowClient()
+              existing = client.search_experiments()
+              print("ERROR: Experiment 'telco_churn_ci' tidak ditemukan.")
+              print(f"Experiments yang ada: {[e.name for e in existing]}")
+              sys.exit(1)
+
           runs = mlflow.search_runs(
               experiment_ids=[experiment.experiment_id],
               max_results=1,
               order_by=['start_time DESC'],
           )
           if len(runs) == 0:
-              raise SystemExit('No runs found!')
+              raise SystemExit('No runs found in experiment telco_churn_ci!')
           run = runs.iloc[0]
           print(f"Run ID         : {run['run_id']}")
           print(f"Status         : {run['status']}")
