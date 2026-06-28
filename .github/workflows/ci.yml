@@ -1,0 +1,172 @@
+name: CI - Train Model and Build Docker Image
+
+# Trigger:
+#  - push ke main yang mengubah MLProject atau workflow
+#  - pull request ke main
+#  - manual via Actions tab
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'MLProject/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOCKER_IMAGE_NAME: telco-churn-mlflow
+  PYTHON_VERSION: '3.12.7'
+  MLFLOW_VERSION: '2.19.0'
+
+jobs:
+  train-and-build:
+    name: Train Model & Build Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+      # ------------------------------------------------------
+      # Setup
+      # ------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: MLProject/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install mlflow==${{ env.MLFLOW_VERSION }}
+          pip install -r MLProject/requirements.txt
+
+      - name: Verify environment
+        run: |
+          echo "Python: $(python --version)"
+          echo "MLflow: $(mlflow --version)"
+          echo "Docker: $(docker --version)"
+
+      # ------------------------------------------------------
+      # Training (Basic: re-training otomatis di CI)
+      # ------------------------------------------------------
+      - name: Run MLflow Project (training)
+        working-directory: MLProject
+        run: |
+          # --env-manager=local pakai env yang sudah di-install di step sebelumnya
+          # supaya tidak perlu build conda env baru (menghemat waktu CI)
+          mlflow run . --env-manager=local
+
+      - name: Get run_id of latest training
+        id: get_run_id
+        working-directory: MLProject
+        run: |
+          RUN_ID=$(cat run_info.txt | tr -d '\n')
+          echo "Latest run_id: $RUN_ID"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+          # Cari path ke folder model artifact untuk Docker build nanti
+          MODEL_PATH=$(find mlruns -type d -path "*/${RUN_ID}/artifacts/model" | head -1)
+          echo "Model path: $MODEL_PATH"
+          echo "model_path=$MODEL_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Display training summary
+        working-directory: MLProject
+        run: |
+          python - << 'EOF'
+          import mlflow
+          mlflow.set_tracking_uri('file:./mlruns')
+          experiment = mlflow.get_experiment_by_name('telco_churn_ci')
+          runs = mlflow.search_runs(
+              experiment_ids=[experiment.experiment_id],
+              max_results=1,
+              order_by=['start_time DESC'],
+          )
+          if len(runs) == 0:
+              raise SystemExit('No runs found!')
+          run = runs.iloc[0]
+          print(f"Run ID         : {run['run_id']}")
+          print(f"Status         : {run['status']}")
+          print(f"Test accuracy  : {run.get('metrics.test_accuracy', 'N/A')}")
+          print(f"Test F1        : {run.get('metrics.test_f1_score', 'N/A')}")
+          print(f"Test ROC-AUC   : {run.get('metrics.test_roc_auc', 'N/A')}")
+          EOF
+
+      # ------------------------------------------------------
+      # Skilled: Upload artefak hasil training ke GitHub
+      # ------------------------------------------------------
+      - name: Upload MLflow artifacts to GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlflow-model-${{ github.run_number }}
+          path: |
+            MLProject/mlruns/
+            MLProject/run_info.txt
+          retention-days: 30
+          if-no-files-found: error
+
+      # ------------------------------------------------------
+      # Advanced: Build & push Docker image ke Docker Hub
+      # ------------------------------------------------------
+      - name: Set up Docker Buildx
+        if: github.event_name != 'pull_request'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Build Docker image with mlflow
+        if: github.event_name != 'pull_request'
+        working-directory: MLProject
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
+          RUN_ID: ${{ steps.get_run_id.outputs.run_id }}
+        run: |
+          IMAGE_TAG="${DOCKER_USERNAME}/${{ env.DOCKER_IMAGE_NAME }}:latest"
+          echo "Building Docker image: $IMAGE_TAG"
+
+          # mlflow build-docker akan generate image yang menjalankan
+          # MLflow model server di port 8080 secara default
+          mlflow models build-docker \
+            --model-uri "runs:/${RUN_ID}/model" \
+            --name "$IMAGE_TAG" \
+            --env-manager local
+
+      - name: Tag & push Docker image to Docker Hub
+        if: github.event_name != 'pull_request'
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
+        run: |
+          IMAGE_BASE="${DOCKER_USERNAME}/${{ env.DOCKER_IMAGE_NAME }}"
+
+          # Tag dengan commit SHA untuk traceability
+          docker tag "${IMAGE_BASE}:latest" "${IMAGE_BASE}:${GITHUB_SHA::7}"
+          docker tag "${IMAGE_BASE}:latest" "${IMAGE_BASE}:run-${{ github.run_number }}"
+
+          docker push "${IMAGE_BASE}:latest"
+          docker push "${IMAGE_BASE}:${GITHUB_SHA::7}"
+          docker push "${IMAGE_BASE}:run-${{ github.run_number }}"
+
+          echo "Image pushed to Docker Hub:"
+          echo "  $IMAGE_BASE:latest"
+          echo "  $IMAGE_BASE:${GITHUB_SHA::7}"
+          echo "  $IMAGE_BASE:run-${{ github.run_number }}"
+
+      - name: Summary
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "=== CI Summary ==="
+          echo "Training       : completed"
+          echo "Run ID         : ${{ steps.get_run_id.outputs.run_id }}"
+          echo "Artifact       : mlflow-model-${{ github.run_number }}"
+          echo "Docker image   : ${{ secrets.DOCKER_HUB_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:latest"

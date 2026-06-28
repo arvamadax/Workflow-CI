@@ -1,0 +1,37 @@
+name: telco-churn-mlflow
+
+conda_env: conda.yaml
+
+entry_points:
+  main:
+    parameters:
+      n_estimators:
+        type: int
+        default: 200
+      max_depth:
+        type: int
+        default: 30
+      min_samples_split:
+        type: int
+        default: 2
+      min_samples_leaf:
+        type: int
+        default: 4
+      max_features:
+        type: str
+        default: "sqrt"
+      class_weight:
+        type: str
+        default: "balanced"
+      random_state:
+        type: int
+        default: 42
+    command: >
+      python modelling.py
+      --n_estimators {n_estimators}
+      --max_depth {max_depth}
+      --min_samples_split {min_samples_split}
+      --min_samples_leaf {min_samples_leaf}
+      --max_features {max_features}
+      --class_weight {class_weight}
+      --random_state {random_state}
