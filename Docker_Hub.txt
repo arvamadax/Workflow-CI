@@ -1,6 +1,1 @@
 https://hub.docker.com/r/arvamadax/telco-churn-mlflow
-
-[Catatan: Ganti URL di atas dengan link Docker Hub repo kamu yang sebenarnya
-setelah workflow CI pertama kali berhasil push image ke Docker Hub.
-
-Format: https://hub.docker.com/r/<username>/<repository_name>]
